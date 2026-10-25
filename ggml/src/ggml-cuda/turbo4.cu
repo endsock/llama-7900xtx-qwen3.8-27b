@@ -17,28 +17,40 @@ static __device__ void turbo4_wht_shared(float * x, bool inverse) {
     __syncthreads();
 }
 
-static __global__ void k_turbo4_wht(const float * src, float * dst, bool inverse) {
+static __global__ void k_turbo4_wht(const float * src, float * dst, bool inverse, const float * scale_inv) {
     __shared__ float x[QK_TURBO4];
     const int64_t i = (int64_t) blockIdx.x*QK_TURBO4 + threadIdx.x;
     x[threadIdx.x] = src[i];
     __syncthreads();
+    // InnerQ forward: apply scale_inv BEFORE signs+WHT (for Q pre-rotation)
+    if (!inverse && scale_inv != nullptr) {
+        x[threadIdx.x] *= scale_inv[threadIdx.x];
+        __syncthreads();
+    }
     turbo4_wht_shared(x, inverse);
+    // InnerQ inverse: apply scale_inv AFTER WHT+signs (for V un-rotation)
+    if (inverse && scale_inv != nullptr) {
+        x[threadIdx.x] *= scale_inv[threadIdx.x];
+    }
     dst[i] = x[threadIdx.x];
 }
 
 void ggml_cuda_turbo_wht(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * scale_tensor = dst->src[1];  // InnerQ scale_inv (may be NULL)
     GGML_ASSERT(dst->type == GGML_TYPE_F32 && ggml_is_contiguous(dst));
     GGML_ASSERT(ggml_is_contiguous(dst->src[0]) && dst->ne[0]%QK_TURBO4 == 0);
     const bool inverse = ggml_get_op_params_i32(dst, 0) != 0;
+    const float * scale_inv = scale_tensor ? (const float *) scale_tensor->data : nullptr;
     k_turbo4_wht<<<ggml_nelements(dst)/QK_TURBO4, QK_TURBO4, 0, ctx.stream()>>>(
-        (const float *) dst->src[0]->data, (float *) dst->data, inverse);
+        (const float *) dst->src[0]->data, (float *) dst->data, inverse, scale_inv);
 }
 
 template <typename idx_t>
 static __global__ void k_set_rows_turbo4(const float * src, const char * indices, char * dst,
         int64_t ne00, int64_t ne01, int64_t ne02, int64_t ne11, int64_t ne12,
         size_t nb01, size_t nb02, size_t nb03, size_t nb10, size_t nb11, size_t nb12,
-        size_t nb1, size_t nb2, size_t nb3) {
+        size_t nb1, size_t nb2, size_t nb3,
+        const float * scale_inv, float * stats) {
     const int j = threadIdx.x;
     const int64_t n_blocks = ne00/QK_TURBO4;
     const int64_t ib = blockIdx.x%n_blocks;
@@ -56,6 +68,13 @@ static __global__ void k_set_rows_turbo4(const float * src, const char * indices
     __shared__ uint8_t indices_q[QK_TURBO4];
     __shared__ float norm;
     x[j] = src_row[ib*QK_TURBO4 + j];
+    if (stats != nullptr) {
+        atomicAdd(stats + j, x[j]*x[j]);
+        if (j == 0) atomicAdd(stats + QK_TURBO4, 1.0f);
+    }
+    if (scale_inv != nullptr) {
+        x[j] /= scale_inv[j];
+    }
     sums[j] = x[j]*x[j];
     __syncthreads();
     for (int h = QK_TURBO4/2; h > 0; h /= 2) {
@@ -104,7 +123,9 @@ void ggml_cuda_set_rows_turbo4(ggml_backend_cuda_context & ctx, ggml_tensor * ds
         (const float *) src->data, (const char *) idx->data, (char *) dst->data, \
         src->ne[0], src->ne[1], src->ne[2], idx->ne[1], idx->ne[2], \
         src->nb[1], src->nb[2], src->nb[3], idx->nb[0], idx->nb[1], idx->nb[2], \
-        dst->nb[1], dst->nb[2], dst->nb[3])
+        dst->nb[1], dst->nb[2], dst->nb[3], \
+        dst->src[3] ? (const float *) dst->src[3]->data : nullptr, \
+        dst->src[4] ? (float *) dst->src[4]->data : nullptr)
     if (idx->type == GGML_TYPE_I64) {
         LAUNCH_TURBO4(int64_t);
     } else {

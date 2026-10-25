@@ -2,6 +2,7 @@
 
 #include "ggml-cpu.h"
 #include "ggml-impl.h"
+#include "ggml-quants.h"
 #include "binary-ops.h"
 #include "simd-gemm.h"
 #include "ggml.h"
@@ -5108,8 +5109,12 @@ static void ggml_compute_forward_set_rows_impl(
     assert(ne02 % ne11 == 0);
     assert(ne03 % ne12 == 0);
 
+    const bool innerq = dst->type == GGML_TYPE_TURBO4_0 && (dst->src[3] || dst->src[4]);
+    const float * scale = innerq && dst->src[3] ? (const float *) dst->src[3]->data : nullptr;
+    float * stats = innerq && dst->src[4] ? (float *) dst->src[4]->data : nullptr;
+    if (stats && params->ith != 0) return;
     const int ith = params->ith;
-    const int nth = params->nth;
+    const int nth = stats ? 1 : params->nth;
 
     // rows per thread
     const int64_t dr = (nr + nth - 1)/nth;
@@ -5134,9 +5139,23 @@ static void ggml_compute_forward_set_rows_impl(
                 GGML_ASSERT(i1 >= 0 && i1 < ne1);
 
                 if constexpr (std::is_same_v<src_t, float>) {
-                    from_float(
-                            (const float *) ((char *) src0->data +  i*nb01 + i02*nb02 + i03*nb03),
-                                            ((char *)  dst->data + i1*nb1  + i02*nb2  + i03*nb3), nc);
+                    if (innerq) {
+                        const float * row = (const float *) ((char *) src0->data + i*nb01 + i02*nb02 + i03*nb03);
+                        for (int64_t b = 0; b < nc; b += QK_TURBO4) {
+                            float values[QK_TURBO4];
+                            for (int j = 0; j < QK_TURBO4; ++j) {
+                                const float value = row[b + j];
+                                if (stats) stats[j] += value*value;
+                                values[j] = scale ? value/scale[j] : value;
+                            }
+                            if (stats) stats[QK_TURBO4] += 1;
+                            from_float(values, (char *) dst->data + i1*nb1 + i02*nb2 + i03*nb3 + ggml_row_size(dst->type, b), QK_TURBO4);
+                        }
+                    } else {
+                        from_float(
+                                (const float *) ((char *) src0->data +  i*nb01 + i02*nb02 + i03*nb03),
+                                                ((char *)  dst->data + i1*nb1  + i02*nb2  + i03*nb3), nc);
+                    }
                 } else if constexpr (std::is_same_v<src_t, ggml_fp16_t>) {
                     if (dst->type == GGML_TYPE_F16) {
                         memcpy(

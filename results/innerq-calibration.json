@@ -1,0 +1,38 @@
+{
+  "choices": [
+    {
+      "finish_reason": "length",
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "基于提供的记录数据（显示这是一个经典的贪吃蛇游戏，具有分数、方向、暂停/重启机制）以及描述中的功能需求，实现该游戏需要以下核心**状态（State）**和**函数（Functions）**：\n\n### 一、 核心状态 (State)\n\n这些变量需要在游戏循环中持久化，并在暂停/重启时正确处理：\n\n1.  **蛇的状态 (Snake State)**\n    *   `snakeBody`: 一个数组，存储蛇身每个节段的坐标（例如 `[{x, y}, {x, y}, ...]`）。\n    *   `direction"
+      }
+    }
+  ],
+  "created": 1792907097,
+  "model": "/data/project/ai/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+  "system_fingerprint": "b12-4419e33",
+  "object": "chat.completion",
+  "usage": {
+    "completion_tokens": 128,
+    "prompt_tokens": 2137,
+    "total_tokens": 2265,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    }
+  },
+  "id": "chatcmpl-0i9PuHPt71PNhh9jTGfm203uDffIf1zI",
+  "timings": {
+    "cache_n": 0,
+    "prompt_n": 2137,
+    "prompt_ms": 3108.895,
+    "prompt_per_token_ms": 1.4547941038839494,
+    "prompt_per_second": 687.3824944232597,
+    "predicted_n": 128,
+    "predicted_ms": 4008.953,
+    "predicted_per_token_ms": 31.56655905511811,
+    "predicted_per_second": 31.679094267256314,
+    "draft_n": 171,
+    "draft_n_accepted": 78
+  }
+}

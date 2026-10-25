@@ -12,6 +12,13 @@
 #include <limits>
 #include <map>
 #include <stdexcept>
+#include <cctype>
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
+
+static constexpr int INNERQ_CHANNELS = 128;
+static constexpr uint32_t INNERQ_STATE_MAGIC = 0x49515131;
 
 static bool ggml_is_power_of_2(int n) {
     return (n & (n - 1)) == 0;
@@ -98,6 +105,25 @@ llama_kv_cache::llama_kv_cache(
     GGML_ASSERT(kv_size % n_pad == 0);
 
     const uint32_t n_layer = hparams.n_layer_all;
+    const char * innerq_calibrate = getenv("TURBO_INNERQ_CALIBRATE");
+    const char * innerq_profile = getenv("TURBO_INNERQ_PROFILE");
+    if (getenv("TURBO_INNERQ")) {
+        throw std::runtime_error("TURBO_INNERQ online calibration was removed; use TURBO_INNERQ_CALIBRATE or TURBO_INNERQ_PROFILE");
+    }
+    if (innerq_calibrate && innerq_profile) {
+        throw std::runtime_error("InnerQ calibration and profile loading are mutually exclusive");
+    }
+    if (const char * strength = getenv("TURBO_INNERQ_STRENGTH")) {
+        size_t end;
+        innerq_strength = std::stof(strength, &end);
+        if (strength[end] != '\0' || !std::isfinite(innerq_strength) || innerq_strength <= 0 || innerq_strength > 1) {
+            throw std::runtime_error("TURBO_INNERQ_STRENGTH must be in (0, 1]");
+        }
+    }
+    const bool turbo = type_k == GGML_TYPE_TURBO4_0 || type_v == GGML_TYPE_TURBO4_0;
+    if (turbo && (innerq_calibrate || innerq_profile) && (type_k != GGML_TYPE_TURBO4_0 || type_v != GGML_TYPE_TURBO4_0)) {
+        throw std::runtime_error("InnerQ profiles currently require turbo4 K and V");
+    }
 
     // define a comparator for the buft -> ctx map to ensure that the order is well-defined:
     struct ggml_backend_buft_comparator {
@@ -112,7 +138,7 @@ llama_kv_cache::llama_kv_cache(
         auto it = ctx_map.find(buft);
         if (it == ctx_map.end()) {
             ggml_init_params params = {
-                /*.mem_size   =*/ size_t(2u*(1 + n_stream)*n_layer*ggml_tensor_overhead()),
+                /*.mem_size   =*/ size_t((2u*(1 + n_stream)*n_layer + 2u*n_layer)*ggml_tensor_overhead()),
                 /*.mem_buffer =*/ NULL,
                 /*.no_alloc   =*/ true,
             };
@@ -184,6 +210,7 @@ llama_kv_cache::llama_kv_cache(
 
                 layers.push_back(layer_share);
                 layers.back().il = il;
+                layers.back().innerq_file.clear();
 
                 continue;
             }
@@ -244,7 +271,45 @@ llama_kv_cache::llama_kv_cache(
 
         map_layer_ids[il] = layers.size();
 
-        layers.push_back({ il, k, v, k_stream, v_stream, });
+        layers.push_back({ il, k, v, k_stream, v_stream, nullptr, nullptr, {}, {} });
+        auto & layer = layers.back();
+        if (turbo && (innerq_calibrate || innerq_profile) && !hparams.no_alloc) {
+            if (hparams.n_embd_head_k(il) % INNERQ_CHANNELS || hparams.n_embd_head_v(il) % INNERQ_CHANNELS) {
+                throw std::runtime_error("InnerQ requires 128-aligned head dimensions");
+            }
+            const std::string identity = model.name + " " + model.desc();
+            std::string filename = identity;
+            for (char & ch : filename) {
+                if (!std::isalnum((unsigned char) ch) && ch != '-' && ch != '_') ch = '_';
+            }
+            filename += "-l" + std::to_string(il) + "-swa" + std::to_string(n_swa) + ".innerq";
+            const std::string path = std::string(innerq_calibrate ? innerq_calibrate : innerq_profile) + "/" + filename;
+            if (innerq_calibrate) {
+                std::ofstream probe(path, std::ios::app);
+                if (!probe) throw std::runtime_error("cannot write InnerQ profile: " + path);
+                layer.innerq_file = path;
+                layer.innerq_stats = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, INNERQ_CHANNELS + 1);
+                ggml_format_name(layer.innerq_stats, "innerq_stats_l%d", il);
+            } else {
+                std::ifstream input(path);
+                std::string magic, saved_identity;
+                int head_k, head_v;
+                input >> magic >> std::quoted(saved_identity) >> head_k >> head_v;
+                if (!input || magic != "INNERQ1" || saved_identity != identity ||
+                    head_k != (int) hparams.n_embd_head_k(il) || head_v != (int) hparams.n_embd_head_v(il)) {
+                    throw std::runtime_error("missing or incompatible InnerQ profile: " + path);
+                }
+                layer.innerq_values.resize(INNERQ_CHANNELS);
+                for (float & value : layer.innerq_values) {
+                    input >> value;
+                    if (!input || !std::isfinite(value) || value < 0.5f || value > 2.0f) {
+                        throw std::runtime_error("invalid InnerQ scale in: " + path);
+                    }
+                }
+                layer.innerq_scale = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, INNERQ_CHANNELS);
+                ggml_format_name(layer.innerq_scale, "innerq_scale_l%d", il);
+            }
+        }
     }
 
     if (reuse) {
@@ -289,6 +354,13 @@ llama_kv_cache::llama_kv_cache(
         LLAMA_LOG_INFO("%s: %10s KV buffer size = %8.2f MiB\n", __func__, ggml_backend_buffer_name(buf), ggml_backend_buffer_get_size(buf)/1024.0/1024.0);
 
         ggml_backend_buffer_clear(buf, 0);
+
+        for (const auto & layer : layers) {
+            if (layer.innerq_scale && layer.innerq_scale->buffer == buf) {
+                ggml_backend_tensor_set(layer.innerq_scale, layer.innerq_values.data(), 0, INNERQ_CHANNELS*sizeof(float));
+            }
+        }
+
         ctxs_bufs.emplace_back(std::move(ctx), buf);
     }
 
@@ -359,8 +431,47 @@ llama_kv_cache::llama_kv_cache(
         }
     }
 
+    if (turbo && !hparams.no_alloc && (innerq_calibrate || innerq_profile)) {
+        LLAMA_LOG_WARN("InnerQ: %s, model=%s, layers=%zu, directory=%s\n",
+                innerq_calibrate ? "collecting K statistics (no scaling)" : "using fixed scales",
+                model.name.c_str(), layers.size(), innerq_calibrate ? innerq_calibrate : innerq_profile);
+    }
+
     const char * LLAMA_KV_CACHE_DEBUG = getenv("LLAMA_KV_CACHE_DEBUG");
     debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
+}
+
+llama_kv_cache::~llama_kv_cache() {
+    for (const auto & layer : layers) {
+        if (!layer.innerq_stats || layer.innerq_file.empty()) continue;
+        float stats[INNERQ_CHANNELS + 1];
+        ggml_backend_tensor_get(layer.innerq_stats, stats, 0, sizeof(stats));
+        if (stats[INNERQ_CHANNELS] == 0) continue;
+        if (!std::all_of(stats, stats + INNERQ_CHANNELS + 1, [](float value) { return std::isfinite(value) && value >= 0; })) {
+            LLAMA_LOG_ERROR("InnerQ: invalid statistics for %s\n", layer.innerq_file.c_str());
+            continue;
+        }
+        float mean = 0;
+        for (int j = 0; j < INNERQ_CHANNELS; ++j) {
+            stats[j] = std::sqrt(stats[j]/stats[INNERQ_CHANNELS]);
+            mean += stats[j]/INNERQ_CHANNELS;
+        }
+        std::ofstream output(layer.innerq_file);
+        output << "INNERQ1 " << std::quoted(model.name + " " + model.desc()) << ' '
+               << hparams.n_embd_head_k(layer.il) << ' ' << hparams.n_embd_head_v(layer.il) << '\n';
+        output << std::setprecision(9);
+        for (int j = 0; j < INNERQ_CHANNELS; ++j) {
+            const float ratio = stats[j] > 1e-10f ? mean/stats[j] : 1.0f;
+            const float scale = std::max(0.5f, std::min(2.0f, std::pow(ratio, innerq_strength)));
+            output << 1.0f/scale << '\n';
+        }
+        output.close();
+        if (!output) {
+            LLAMA_LOG_ERROR("InnerQ: failed to save %s\n", layer.innerq_file.c_str());
+        } else {
+            LLAMA_LOG_WARN("InnerQ: saved layer %u, %.0f K blocks to %s\n", layer.il, stats[INNERQ_CHANNELS], layer.innerq_file.c_str());
+        }
+    }
 }
 
 void llama_kv_cache::clear(bool data) {
@@ -372,6 +483,12 @@ void llama_kv_cache::clear(bool data) {
     if (data) {
         for (auto & [_, buf] : ctxs_bufs) {
             ggml_backend_buffer_clear(buf.get(), 0);
+        }
+
+        for (const auto & layer : layers) {
+            if (layer.innerq_scale) {
+                ggml_backend_tensor_set(layer.innerq_scale, layer.innerq_values.data(), 0, INNERQ_CHANNELS*sizeof(float));
+            }
         }
     }
 }
@@ -1330,6 +1447,10 @@ ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggm
     }
 
     // store the current K values into the cache
+    const auto & layer = layers[ikv];
+    if (layer.innerq_scale || layer.innerq_stats) {
+        return ggml_set_rows_turbo4(ctx, k, k_cur, k_idxs, layer.innerq_scale, layer.innerq_stats);
+    }
     return ggml_set_rows(ctx, k, k_cur, k_idxs);
 }
 
@@ -1365,6 +1486,10 @@ ggml_tensor * llama_kv_cache::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggm
             v = ggml_reshape_2d(ctx, v, n_embd_gqa, kv_size*n_stream);
         }
 
+        const auto & layer = layers[ikv];
+        if (layer.innerq_scale) {
+            return ggml_set_rows_turbo4(ctx, v, v_cur, v_idxs, layer.innerq_scale, nullptr);
+        }
         return ggml_set_rows(ctx, v, v_cur, v_idxs);
     }
 
@@ -1972,6 +2097,12 @@ void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, lla
 
     GGML_UNUSED(flags);
 
+    for (const auto & layer : layers) {
+        if (layer.innerq_scale) {
+            io.write(&INNERQ_STATE_MAGIC, sizeof(INNERQ_STATE_MAGIC));
+            io.write(layer.innerq_values.data(), INNERQ_CHANNELS*sizeof(float));
+        }
+    }
     io.write(&n_stream, sizeof(n_stream));
 
     for (uint32_t s = 0; s < n_stream; ++s) {
@@ -2044,6 +2175,18 @@ void llama_kv_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama
 
     GGML_ASSERT(seq_id == -1 || (seq_id >= 0 && (size_t) seq_id < seq_to_stream.size()));
 
+    for (const auto & layer : layers) {
+        if (layer.innerq_scale) {
+            uint32_t magic;
+            float values[INNERQ_CHANNELS];
+            io.read(&magic, sizeof(magic));
+            if (magic != INNERQ_STATE_MAGIC) throw std::runtime_error("KV state has no matching InnerQ profile");
+            io.read(values, sizeof(values));
+            if (!std::equal(values, values + INNERQ_CHANNELS, layer.innerq_values.begin())) {
+                throw std::runtime_error("KV state InnerQ scale mismatch");
+            }
+        }
+    }
     uint32_t n_stream_cur;
     io.read(&n_stream_cur, sizeof(n_stream_cur));
     if (n_stream_cur != n_stream) {

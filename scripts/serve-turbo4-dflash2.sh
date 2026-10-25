@@ -15,7 +15,7 @@ exec "$ROOT/build-turbo4/bin/llama-server" \
   --spec-ngram-map-k4v-min-hits 1 \
   -ngld 99 \
   -ctk turbo4_0 -ctv turbo4_0 \
-  -ngl 99 -c 262144 \
+  -ngl 99 -c "${CTX:-262144}" \
   -b 2048 -ub 512 \
   -fa on --jinja \
   --reasoning-effort medium \

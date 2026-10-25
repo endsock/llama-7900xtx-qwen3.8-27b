@@ -1709,6 +1709,15 @@ extern "C" {
             struct ggml_tensor  * b,  // source
             struct ggml_tensor  * c); // row indices
 
+    // InnerQ: scale_inv has 128 channels; stats has 128 square sums and one block count.
+    GGML_API struct ggml_tensor * ggml_set_rows_turbo4(
+            struct ggml_context * ctx,
+            struct ggml_tensor * dst,
+            struct ggml_tensor * src,
+            struct ggml_tensor * indices,
+            struct ggml_tensor * scale_inv,
+            struct ggml_tensor * stats);
+
     GGML_API struct ggml_tensor * ggml_diag(
         struct ggml_context     * ctx,
         struct ggml_tensor      * a);
@@ -2574,7 +2583,8 @@ extern "C" {
         bool                  lower,
         bool                  uni);
 
-    GGML_API struct ggml_tensor * ggml_turbo_wht(struct ggml_context * ctx, struct ggml_tensor * a, bool inverse);
+    // scale: optional per-channel InnerQ scale_inv, NULL = no scaling
+    GGML_API struct ggml_tensor * ggml_turbo_wht(struct ggml_context * ctx, struct ggml_tensor * a, bool inverse, struct ggml_tensor * scale);
 
     // TODO: add ggml_gated_delta_net_set_bcast() to be able to configure Q, K broadcast type: tiled vs interleaved [TAG_GGML_GDN_BCAST]
     // ref: https://github.com/ggml-org/llama.cpp/pull/19468#discussion_r2786394306

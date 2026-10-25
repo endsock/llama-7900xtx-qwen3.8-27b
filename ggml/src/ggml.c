@@ -3997,6 +3997,24 @@ struct ggml_tensor * ggml_set_rows(
     return result;
 }
 
+struct ggml_tensor * ggml_set_rows_turbo4(
+        struct ggml_context * ctx,
+        struct ggml_tensor * dst,
+        struct ggml_tensor * src,
+        struct ggml_tensor * indices,
+        struct ggml_tensor * scale_inv,
+        struct ggml_tensor * stats) {
+    GGML_ASSERT(dst->type == GGML_TYPE_TURBO4_0 && src->type == GGML_TYPE_F32);
+    GGML_ASSERT(src->ne[0] % QK_TURBO4 == 0);
+    GGML_ASSERT(!scale_inv || (scale_inv->type == GGML_TYPE_F32 && ggml_is_contiguous(scale_inv) && ggml_nelements(scale_inv) == QK_TURBO4));
+    GGML_ASSERT(!stats || (stats->type == GGML_TYPE_F32 && ggml_is_contiguous(stats) && ggml_nelements(stats) == QK_TURBO4 + 1));
+    GGML_ASSERT(!scale_inv || !stats);
+    struct ggml_tensor * result = ggml_set_rows(ctx, dst, src, indices);
+    result->src[3] = scale_inv;
+    result->src[4] = stats;
+    return result;
+}
+
 // ggml_diag
 
 struct ggml_tensor * ggml_diag(
@@ -6292,13 +6310,15 @@ struct ggml_tensor * ggml_solve_tri(
     return result;
 }
 
-struct ggml_tensor * ggml_turbo_wht(struct ggml_context * ctx, struct ggml_tensor * a, bool inverse) {
+struct ggml_tensor * ggml_turbo_wht(struct ggml_context * ctx, struct ggml_tensor * a, bool inverse, struct ggml_tensor * scale) {
     GGML_ASSERT(a->type == GGML_TYPE_F32 && ggml_is_contiguous(a));
     GGML_ASSERT(a->ne[0] % QK_TURBO4 == 0);
+    GGML_ASSERT(!scale || (scale->type == GGML_TYPE_F32 && ggml_is_contiguous(scale) && ggml_nelements(scale) == QK_TURBO4));
     struct ggml_tensor * result = ggml_dup_tensor(ctx, a);
     ggml_set_op_params_i32(result, 0, inverse);
     result->op = GGML_OP_TURBO_WHT;
     result->src[0] = a;
+    result->src[1] = scale; // InnerQ scale_inv (NULL = no scaling)
     return result;
 }
 

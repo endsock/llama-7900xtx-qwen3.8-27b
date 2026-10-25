@@ -2523,13 +2523,14 @@ ggml_tensor * llm_graph_context::build_attn_mha(
          ggml_tensor * sinks,
          ggml_tensor * v_mla,
                float   kq_scale,
-                 int   il) const {
+                 int   il,
+         ggml_tensor * turbo_innerq_scale) const {
     const bool v_trans = v->nb[1] > v->nb[2];
     const bool turbo_k = k->type == GGML_TYPE_TURBO4_0;
     const bool turbo_v = v->type == GGML_TYPE_TURBO4_0;
     GGML_ASSERT((!turbo_k && !turbo_v) || cparams.flash_attn);
     if (turbo_k) {
-        q = ggml_turbo_wht(ctx0, ggml_cont(ctx0, q), false);
+        q = ggml_turbo_wht(ctx0, ggml_cont(ctx0, q), false, turbo_innerq_scale);
     }
 
     // split the batch into streams if needed
@@ -2568,7 +2569,7 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         ggml_flash_attn_ext_set_prec (cur, GGML_PREC_F32);
 
         if (turbo_v) {
-            cur = ggml_turbo_wht(ctx0, cur, true);
+            cur = ggml_turbo_wht(ctx0, cur, true, turbo_innerq_scale);
         }
 
         if (v_mla) {
@@ -2817,7 +2818,9 @@ ggml_tensor * llm_graph_context::build_attn(
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
     ggml_tensor * v = mctx_cur->get_v(ctx0, il);
 
-    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il);
+    ggml_tensor * turbo_innerq_scale = mctx_cur->get_turbo_innerq_scale_inv(il);
+
+    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il, turbo_innerq_scale);
     cb(cur, "kqv_out", il);
 
     if (inp->self_v_rot) {

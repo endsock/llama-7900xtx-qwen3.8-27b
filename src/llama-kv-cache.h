@@ -5,6 +5,7 @@
 #include "llama-kv-cells.h"
 #include "llama-memory.h"
 
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -114,7 +115,7 @@ public:
         const  layer_reuse_cb & reuse,
         const  layer_share_cb & share);
 
-    ~llama_kv_cache() = default;
+    ~llama_kv_cache();
 
     //
     // llama_memory_i
@@ -160,6 +161,8 @@ public:
 
     ggml_type type_k() const;
     ggml_type type_v() const;
+
+    ggml_tensor * get_turbo_innerq_scale_inv(int32_t il) const { return layers[map_layer_ids.at(il)].innerq_scale; }
 
     std::vector<uint32_t> get_layer_ids() const;
     ggml_tensor * get_k_storage(int32_t il) const;
@@ -233,6 +236,11 @@ private:
 
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
+
+        ggml_tensor * innerq_scale = nullptr;
+        ggml_tensor * innerq_stats = nullptr;
+        std::vector<float> innerq_values;
+        std::string innerq_file;
     };
 
     bool v_trans = true;  // the value tensor is transposed
@@ -257,6 +265,8 @@ private:
 
     // pre-computed hadamard martrices
     std::unordered_map<int64_t, std::vector<float>> attn_rot_hadamard;
+
+    float innerq_strength = 0.5f;
 
     // env: LLAMA_KV_CACHE_DEBUG
     int debug = 0;
@@ -368,6 +378,8 @@ public:
 
     ggml_type type_k() const;
     ggml_type type_v() const;
+
+    ggml_tensor * get_turbo_innerq_scale_inv(int32_t il) const { return kv->get_turbo_innerq_scale_inv(il); }
 
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;

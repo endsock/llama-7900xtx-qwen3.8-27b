@@ -2100,11 +2100,25 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 const float * src = tensor->src[0]->data;
                 float * dst = tensor->data;
+                const float * scale = tensor->src[1] ? tensor->src[1]->data : NULL;
                 GGML_ASSERT(ggml_is_contiguous(tensor->src[0]) && ggml_is_contiguous(tensor));
                 const int64_t groups = ggml_nelements(tensor)/QK_TURBO4;
                 const bool inverse = ggml_get_op_params_i32(tensor, 0) != 0;
                 for (int64_t i = params->ith; i < groups; i += params->nth) {
-                    ggml_turbo_wht_f32(src + i*QK_TURBO4, dst + i*QK_TURBO4, inverse);
+                    if (inverse) {
+                        ggml_turbo_wht_f32(src + i*QK_TURBO4, dst + i*QK_TURBO4, true);
+                        if (scale) {
+                            for (int j = 0; j < QK_TURBO4; ++j) {
+                                dst[i*QK_TURBO4 + j] *= scale[j];
+                            }
+                        }
+                    } else {
+                        float tmp[QK_TURBO4];
+                        for (int j = 0; j < QK_TURBO4; ++j) {
+                            tmp[j] = src[i*QK_TURBO4 + j]*(scale ? scale[j] : 1.0f);
+                        }
+                        ggml_turbo_wht_f32(tmp, dst + i*QK_TURBO4, false);
+                    }
                 }
             } break;
         case GGML_OP_LIGHTNING_INDEXER:
