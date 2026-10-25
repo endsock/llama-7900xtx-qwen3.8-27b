@@ -629,6 +629,14 @@ FILE * ggml_fopen(const char * fname, const char * mode) {
 }
 
 static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
+    [GGML_TYPE_TURBO4_0] = {
+        .type_name = "turbo4",
+        .blck_size = QK_TURBO4,
+        .type_size = sizeof(block_turbo4_0),
+        .is_quantized = true,
+        .to_float = (ggml_to_float_t) dequantize_row_turbo4_0,
+        .from_float_ref = (ggml_from_float_t) quantize_row_turbo4_0_ref,
+    },
     [GGML_TYPE_I8] = {
         .type_name                = "i8",
         .blck_size                = 1,
@@ -1114,9 +1122,10 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "OPT_STEP_SGD",
 
     "GLU",
+    "TURBO_WHT",
 };
 
-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
+static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1229,9 +1238,10 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "sgd(x)",
 
     "glu(x)",
+    "turbo_wht(x)",
 };
 
-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
+static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6279,6 +6289,16 @@ struct ggml_tensor * ggml_solve_tri(
     result->src[0] = a;
     result->src[1] = b;
 
+    return result;
+}
+
+struct ggml_tensor * ggml_turbo_wht(struct ggml_context * ctx, struct ggml_tensor * a, bool inverse) {
+    GGML_ASSERT(a->type == GGML_TYPE_F32 && ggml_is_contiguous(a));
+    GGML_ASSERT(a->ne[0] % QK_TURBO4 == 0);
+    struct ggml_tensor * result = ggml_dup_tensor(ctx, a);
+    ggml_set_op_params_i32(result, 0, inverse);
+    result->op = GGML_OP_TURBO_WHT;
+    result->src[0] = a;
     return result;
 }
 

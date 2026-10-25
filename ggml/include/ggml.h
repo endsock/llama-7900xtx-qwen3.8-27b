@@ -434,7 +434,8 @@ extern "C" {
         // ROCmFPX project, so they must keep these fixed ids)
         GGML_TYPE_Q4_0_ROCMFP4      = 100, // ROCmFP4 dual half-block UE4M3 scales
         GGML_TYPE_Q4_0_ROCMFP4_FAST = 101, // ROCmFP4 single-scale speed layout
-        GGML_TYPE_COUNT   = 102,
+        GGML_TYPE_TURBO4_0         = 102, // runtime KV cache, 128 values per 68-byte block
+        GGML_TYPE_COUNT   = 103,
     };
 
     // precision
@@ -600,6 +601,7 @@ extern "C" {
         GGML_OP_OPT_STEP_SGD,
 
         GGML_OP_GLU,
+        GGML_OP_TURBO_WHT,
 
         GGML_OP_COUNT,
     };
@@ -2571,6 +2573,8 @@ extern "C" {
         bool                  left,
         bool                  lower,
         bool                  uni);
+
+    GGML_API struct ggml_tensor * ggml_turbo_wht(struct ggml_context * ctx, struct ggml_tensor * a, bool inverse);
 
     // TODO: add ggml_gated_delta_net_set_bcast() to be able to configure Q, K broadcast type: tiled vs interleaved [TAG_GGML_GDN_BCAST]
     // ref: https://github.com/ggml-org/llama.cpp/pull/19468#discussion_r2786394306

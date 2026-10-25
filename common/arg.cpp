@@ -303,6 +303,7 @@ struct handle_model_result {
 };
 
 const std::vector<ggml_type> kv_cache_types = {
+    GGML_TYPE_TURBO4_0,
     GGML_TYPE_F32,
     GGML_TYPE_F16,
     GGML_TYPE_BF16,
@@ -315,6 +316,9 @@ const std::vector<ggml_type> kv_cache_types = {
 };
 
 static ggml_type kv_cache_type_from_str(const std::string & s) {
+    if (s == "turbo4_0") {
+        return GGML_TYPE_TURBO4_0;
+    }
     for (const auto & type : kv_cache_types) {
         if (ggml_type_name(type) == s) {
             return type;

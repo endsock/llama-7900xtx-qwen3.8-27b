@@ -5915,6 +5915,10 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
                     }
                 }
             } break;
+        case GGML_TYPE_TURBO4_0:
+            {
+                VALIDATE_ROW_DATA_DM_F16_IMPL(block_turbo4_0, data, nb, norm, rnorm);
+            } break;
         case GGML_TYPE_Q1_0:
             {
                 VALIDATE_ROW_DATA_D_F16_IMPL(block_q1_0, data, nb);

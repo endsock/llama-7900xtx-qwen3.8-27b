@@ -271,6 +271,14 @@ typedef struct {
 } block_q8_0;
 static_assert(sizeof(block_q8_0) == sizeof(ggml_half) + QK8_0, "wrong q8_0 block size/padding");
 
+#define QK_TURBO4 128
+typedef struct {
+    ggml_half norm;
+    ggml_half rnorm;
+    uint8_t qs[QK_TURBO4 / 2];
+} block_turbo4_0;
+static_assert(sizeof(block_turbo4_0) == 68, "wrong turbo4_0 block size");
+
 #define QK8_1 32
 typedef struct {
     GGML_EXTENSION union {

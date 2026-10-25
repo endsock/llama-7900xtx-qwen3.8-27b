@@ -3,6 +3,7 @@
 #include "common.cuh"
 #include "convert.cuh"
 #include "vecdotq.cuh"
+#include "../ggml-turbo4.h"
 
 #include <cstdint>
 
@@ -617,6 +618,46 @@ static __device__ __forceinline__ void dequantize_V_q8_0(const void * __restrict
     }
 }
 
+template <int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo4_0(
+        const char * K_c, const void * Q_v, const int * Q_q8, const void * Q_ds_v) {
+    const block_turbo4_0 * K = (const block_turbo4_0 *) K_c;
+    constexpr int cpy_ne = ggml_cuda_get_max_cpy_bytes()/4;
+    float sum = 0.0f;
+#pragma unroll
+    for (int base = 0; base < D/2; base += nthreads*cpy_ne) {
+#pragma unroll
+        for (int l = 0; l < cpy_ne; ++l) {
+            const int i = 2*(base + (threadIdx.x%nthreads)*cpy_ne + l);
+            const block_turbo4_0 & b = K[i/QK_TURBO4];
+            const uint8_t qs = b.qs[(i%QK_TURBO4)/2];
+            const float norm = __half2float(b.norm);
+            const float2 kv = make_float2(turbo4_centroids[qs & 15]*norm, turbo4_centroids[qs >> 4]*norm);
+#ifdef V_DOT2_F32_F16_AVAILABLE
+            const float2 q = __half22float2(((const half2 *) Q_v)[base/nthreads + l]);
+#else
+            const float2 q = ((const float2 *) Q_v)[base/nthreads + l];
+#endif
+            sum += kv.x*q.x + kv.y*q.y;
+        }
+    }
+    GGML_UNUSED(Q_q8); GGML_UNUSED(Q_ds_v);
+    return sum;
+}
+
+template <typename T, int ne>
+static __device__ __forceinline__ void dequantize_V_turbo4_0(const void * vx, void * dst, const int64_t i0) {
+    const block_turbo4_0 * x = (const block_turbo4_0 *) vx;
+#pragma unroll
+    for (int l = 0; l < ne; ++l) {
+        const int64_t i = i0 + l;
+        const block_turbo4_0 & b = x[i/QK_TURBO4];
+        const int j = i%QK_TURBO4;
+        const float value = __half2float(b.norm)*turbo4_centroids[(b.qs[j/2] >> (4*(j%2))) & 15];
+        ((T *) dst)[l] = ggml_cuda_cast<T>(value);
+    }
+}
+
 template <ggml_type type_K, int D, int nthreads>
 constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
     if constexpr (type_K == GGML_TYPE_F16) {
@@ -631,6 +672,8 @@ constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
         return vec_dot_fattn_vec_KQ_q5_1<D, nthreads>;
     } else if constexpr (type_K == GGML_TYPE_Q8_0) {
         return vec_dot_fattn_vec_KQ_q8_0<D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TURBO4_0) {
+        return vec_dot_fattn_vec_KQ_turbo4_0<D, nthreads>;
     } else if constexpr (type_K == GGML_TYPE_BF16) {
         return vec_dot_fattn_vec_KQ_bf16<D, nthreads>;
     } else {
@@ -653,6 +696,8 @@ constexpr __device__ dequantize_V_t get_dequantize_V() {
         return dequantize_V_q5_1<T, ne>;
     } else if constexpr (type_V == GGML_TYPE_Q8_0) {
         return dequantize_V_q8_0<T, ne>;
+    } else if constexpr (type_V == GGML_TYPE_TURBO4_0) {
+        return dequantize_V_turbo4_0<T, ne>;
     } else if constexpr (type_V == GGML_TYPE_BF16) {
         return dequantize_V_bf16<float, ne>;
     } else {

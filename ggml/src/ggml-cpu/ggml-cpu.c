@@ -7,6 +7,7 @@
 #include "ggml-cpu-impl.h"
 #include "ggml-impl.h"
 #include "quants.h"
+#include "ggml-quants.h"
 #include "ggml-threading.h"
 #include "unary-ops.h"
 #include "binary-ops.h"
@@ -211,7 +212,30 @@ typedef pthread_t ggml_thread_t;
 #include <TargetConditionals.h>
 #endif
 
+static void ggml_vec_dot_turbo4_f32(int n, float * GGML_RESTRICT s, size_t bs,
+        const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    GGML_ASSERT(nrc == 1 && n % QK_TURBO4 == 0);
+    const block_turbo4_0 * x = vx;
+    const float * y = vy;
+    float sum = 0.0f;
+    for (int i = 0; i < n; i += QK_TURBO4) {
+        float tmp[QK_TURBO4];
+        dequantize_row_turbo4_0(x + i/QK_TURBO4, tmp, QK_TURBO4);
+        for (int j = 0; j < QK_TURBO4; ++j) {
+            sum += tmp[j]*y[i + j];
+        }
+    }
+    *s = sum;
+    GGML_UNUSED(bs); GGML_UNUSED(bx); GGML_UNUSED(by);
+}
+
 static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
+    [GGML_TYPE_TURBO4_0] = {
+        .from_float = (ggml_from_float_t) quantize_row_turbo4_0_ref,
+        .vec_dot = ggml_vec_dot_turbo4_f32,
+        .vec_dot_type = GGML_TYPE_F32,
+        .nrows = 1,
+    },
     [GGML_TYPE_F32] = {
         .from_float               = (ggml_from_float_t) ggml_cpu_fp32_to_fp32,
         .vec_dot                  = (ggml_vec_dot_t) ggml_vec_dot_f32,
@@ -2072,6 +2096,17 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_gated_delta_net(params, tensor);
             } break;
+        case GGML_OP_TURBO_WHT:
+            {
+                const float * src = tensor->src[0]->data;
+                float * dst = tensor->data;
+                GGML_ASSERT(ggml_is_contiguous(tensor->src[0]) && ggml_is_contiguous(tensor));
+                const int64_t groups = ggml_nelements(tensor)/QK_TURBO4;
+                const bool inverse = ggml_get_op_params_i32(tensor, 0) != 0;
+                for (int64_t i = params->ith; i < groups; i += params->nth) {
+                    ggml_turbo_wht_f32(src + i*QK_TURBO4, dst + i*QK_TURBO4, inverse);
+                }
+            } break;
         case GGML_OP_LIGHTNING_INDEXER:
             {
                 ggml_compute_forward_lightning_indexer(params, tensor);
@@ -2266,6 +2301,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
                 n_tasks = 1;
             } break;
         case GGML_OP_COUNT_EQUAL:
+        case GGML_OP_TURBO_WHT:
         case GGML_OP_SOLVE_TRI:
         case GGML_OP_GATED_DELTA_NET:
         case GGML_OP_DSV4_HC_COMB:

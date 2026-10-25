@@ -2525,6 +2525,12 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                float   kq_scale,
                  int   il) const {
     const bool v_trans = v->nb[1] > v->nb[2];
+    const bool turbo_k = k->type == GGML_TYPE_TURBO4_0;
+    const bool turbo_v = v->type == GGML_TYPE_TURBO4_0;
+    GGML_ASSERT((!turbo_k && !turbo_v) || cparams.flash_attn);
+    if (turbo_k) {
+        q = ggml_turbo_wht(ctx0, ggml_cont(ctx0, q), false);
+    }
 
     // split the batch into streams if needed
     const auto n_stream = k->ne[3];
@@ -2560,6 +2566,10 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         ggml_flash_attn_ext_add_sinks(cur, sinks);
         ggml_flash_attn_ext_set_prec (cur, GGML_PREC_F32);
+
+        if (turbo_v) {
+            cur = ggml_turbo_wht(ctx0, cur, true);
+        }
 
         if (v_mla) {
 #if 0
