@@ -9,7 +9,7 @@
 #include <cstring>
 #include <vector>
 
-static bool test_backend(ggml_backend_t backend, int d, int nq, bool attention) {
+static bool test_backend(ggml_backend_t backend, int d, int nq, bool attention, bool mixed = false) {
     ggml_context * ctx = ggml_init({4*1024*1024, nullptr, true});
     ggml_tensor * src = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, d, 256);
     ggml_tensor * ids = ggml_new_tensor_1d(ctx, nq == 1 ? GGML_TYPE_I32 : GGML_TYPE_I64, 256);
@@ -20,7 +20,13 @@ static bool test_backend(ggml_backend_t backend, int d, int nq, bool attention) 
     ggml_tensor * restored = ggml_turbo_wht(ctx, rotated, true);
     ggml_tensor * output = nullptr;
     if (attention) {
-        output = ggml_flash_attn_ext(ctx, rotated, store, store, nullptr, 1.0f/std::sqrt(float(d)), 0.0f, 0.0f);
+        ggml_tensor * keys = store;
+        if (mixed) {
+            ggml_tensor * kcache = ggml_new_tensor_2d(ctx, GGML_TYPE_Q8_0, d, 256);
+            keys = ggml_set_rows(ctx, kcache, src, ids);
+        }
+        output = ggml_flash_attn_ext(ctx, mixed ? q : rotated, keys, store, nullptr, 1.0f/std::sqrt(float(d)), 0.0f, 0.0f);
+        GGML_ASSERT(ggml_backend_supports_op(backend, output));
         output = ggml_turbo_wht(ctx, output, true);
     }
     ggml_cgraph * graph = ggml_new_graph(ctx);
@@ -65,16 +71,27 @@ static bool test_backend(ggml_backend_t backend, int d, int nq, bool attention) 
         }
     }
     if (output) {
-        std::vector<float> actual(d*nq), qrot(d), expected(d), unrot(d), scores(256);
+        std::vector<float> actual(d*nq), qrot(d), expected(d), unrot(d), scores(256), keys = kv;
+        if (mixed) {
+            std::vector<block_q8_0> kpacked(d/QK8_0);
+            for (int r = 0; r < 256; ++r) {
+                quantize_row_q8_0_ref(x.data() + r*d, kpacked.data(), d);
+                dequantize_row_q8_0(kpacked.data(), keys.data() + (255 - r)*d, d);
+            }
+        }
         ggml_backend_tensor_get(output, actual.data(), 0, actual.size()*sizeof(float));
         for (int n = 0; n < nq; ++n) {
             for (int j = 0; j < d; j += QK_TURBO4) {
-                ggml_turbo_wht_f32(queries.data() + n*d + j, qrot.data() + j, false);
+                if (mixed) {
+                    std::copy_n(queries.data() + n*d + j, QK_TURBO4, qrot.data() + j);
+                } else {
+                    ggml_turbo_wht_f32(queries.data() + n*d + j, qrot.data() + j, false);
+                }
             }
             for (int r = 0; r < 256; ++r) {
                 float dot = 0.0f;
                 for (int j = 0; j < d; ++j) {
-                    dot += kv[r*d + j]*qrot[j];
+                    dot += keys[r*d + j]*qrot[j];
                 }
                 scores[r] = dot/std::sqrt(float(d));
             }
@@ -100,8 +117,8 @@ static bool test_backend(ggml_backend_t backend, int d, int nq, bool attention) 
     }
     const bool ok = std::isfinite(wht_error + quant_error + attn_error) &&
                     wht_error < 1e-5f && quant_error < 0.002f && attn_error < 0.002f;
-    std::printf("%s D=%d Q=%d WHT=%g quant=%g attention=%g %s\n",
-                ggml_backend_name(backend), d, nq, wht_error, quant_error, attn_error, ok ? "PASS" : "FAIL");
+    std::printf("%s K=%s D=%d Q=%d WHT=%g quant=%g attention=%g %s\n",
+                ggml_backend_name(backend), mixed ? "q8_0" : "turbo4_0", d, nq, wht_error, quant_error, attn_error, ok ? "PASS" : "FAIL");
     ggml_backend_buffer_free(buffer);
     ggml_free(ctx);
     return ok;
@@ -116,6 +133,9 @@ int main(int argc, char ** argv) {
     for (int d : {128, 256}) {
         for (int nq : {1, 5}) {
             ok = test_backend(backend, d, nq, gpu) && ok;
+            if (gpu) {
+                ok = test_backend(backend, d, nq, true, true) && ok;
+            }
         }
     }
     ggml_backend_free(backend);

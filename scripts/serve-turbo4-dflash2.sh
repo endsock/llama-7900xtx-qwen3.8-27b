@@ -16,7 +16,7 @@ exec "$ROOT/build-turbo4/bin/llama-server" \
   -ngld 99 \
   -ctk turbo4_0 -ctv turbo4_0 \
   -ngl 99 -c 262144 \
-  -b 2048 -ub 256 \
+  -b 2048 -ub 512 \
   -fa on --jinja \
   --reasoning-effort medium \
   --no-kv-unified --parallel 1 \

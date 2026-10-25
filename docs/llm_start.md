@@ -2,14 +2,15 @@
 
 > 更新：`turboquant-hip-dflash2` 分支已接入 turbo4 KV，并使用本模型和 DFlash2 运行到有效上下文 `262144`，完成 42108 token 输入及实际生成。当前启动方式与实测结果见 [TurboQuant HIP 记录](turboquant-hip.md)。下文保留此前 main 分支的 q8_0/q4_0 配置作为基线。
 
-本文记录 RX 7900 XTX / gfx1100、HIP 后端下的启动配置和历史经验。上下文长度均包含输入与输出；能启动、能处理普通请求，不代表已经通过接近最大长度的满上下文压力测试。
+本文记录 RX 7900 XTX / gfx1100、HIP 后端下的启动配置和历史经验。除非另有明确说明，本文记录的服务启动命令统一显式使用 `--reasoning-effort medium`；上下文长度均包含输入与输出。能启动、能处理普通请求，不代表已经通过接近最大长度的满上下文压力测试。
 
 ## 1. 模型与上下文记录
 
 | 主模型 | K / V 缓存 | 上下文 | 记录状态 |
 |---|---|---|---|
 | `Qwen3.8-27B-Q4_0_ROCMFP4_STRIX.gguf` | `q8_0 / q4_0` | `262144` (256 Ki tokens) | 此前运行配置，健康检查正常，已正常生成；未验证满 256K 请求 |
-| `Qwen3.8-27B-UD-Q4_K_XL.gguf` | `q8_0 / q4_0` | `192512` (188 Ki tokens) | 当前运行配置，`-ub 256`；已完成约 40517 token 输入、1522 token 输出，用户确认正常；`-ub 512` 首次请求 OOM；未验证满 188K |
+| `Qwen3.8-27B-UD-Q4_K_XL.gguf` | `turbo4_0 / turbo4_0` | `262144` (256 Ki tokens) | 当前运行配置，`-ub 512`；已完成约 42108 token 输入和真实生成测试，用户确认正常；未验证满 256K |
+| `Qwen3.8-27B-UD-Q4_K_XL.gguf` | `q8_0 / turbo4_0` | `200000` (actual `200192`) | 当前运行配置；已通过健康检查和最小生成；`210000` 在约 190K 输入的实际 decode 阶段 OOM；在 `65536` 完成贪吃蛇测速，55.51 tok/s |
 | 当时使用的模型，文件名未单独确认 | `q4_0 / q4_0` | 用户描述约 250K | 用户实测反馈；未记录精确 `-c` 数值，不等同于已验证 `262144` |
 | `Qwen3.8-27B-heretic-ara.ROCmFP4-STRIX.gguf` | `q4_0 / q4_0` | `262144` | `scripts/serve-dflash2.sh` 的默认参考配置及既有文档经验，不是当前模型 |
 
@@ -38,9 +39,9 @@ export LLAMA_ATTN_ROT_DISABLE=1
   --spec-ngram-map-k4v-size-m 48 \
   --spec-ngram-map-k4v-min-hits 1 \
   -ngld 99 \
-  -ctk q8_0 -ctv q4_0 \
-  -ngl 99 -c 192512 \
-  -b 2048 -ub 256 \
+  -ctk turbo4_0 -ctv turbo4_0 \
+  -ngl 99 -c 262144 \
+  -b 2048 -ub 512 \
   -fa on --jinja \
   --reasoning-effort medium \
   --no-kv-unified --parallel 1 \
@@ -49,7 +50,7 @@ export LLAMA_ATTN_ROT_DISABLE=1
   --host 0.0.0.0 --port 1234
 ```
 
-本次中等思考启动日志：`/tmp/llama-server-ud-q8q4-192512-ub256-medium.log`。此前 `-ub 256` 的成功运行日志为 `/tmp/llama-server-ud-q8q4-192512-ub256.log`。这些路径位于临时目录，不保证重启后保留。
+本次 turbo4 中等思考启动日志：`/tmp/llama-turbo4-262144.log`。该路径位于临时目录，不保证重启后保留。
 
 当前显式设置 `--reasoning-effort medium`，没有显式设置 `HSA_ENABLE_SDMA`、`--fit off`、外部聊天模板、思考开关、输出解析格式或思考预算。`--no-mmproj` 禁止自动加载视觉投影文件，当前也没有通过 `--mmproj` 指定文件，因此本次服务未启用视觉输入。
 
@@ -123,11 +124,26 @@ dflash requires ctx_other to be set (this warning is normal during memory fittin
 
 ### 物理批大小与视觉编码器
 
-- 当前 `-b 2048 -ub 256`。UD 模型使用 `q8_0/q4_0`、`-c 192512`、`-ub 512` 时，启动健康检查正常，但首个请求在 HIP 临时内存分配时出现 `ROCm error: out of memory` 并退出。仅将 `-ub` 改为 `256` 后，已完成约 4 万 token 输入的请求和真实生成测试，用户确认正常；该请求生成速度约 31.2 tok/s，不作为固定性能保证。
+- 当前 `-b 2048 -ub 512`。turbo4 使用 `turbo4_0/turbo4_0`、`-c 262144`，已完成约 42108 token 输入和真实生成测试，未出现 OOM；详细结果见 [TurboQuant HIP 记录](turboquant-hip.md)。此前 q8_0/q4_0 配置在 `-ub 512` 首次请求 OOM，不能套用于当前 turbo4 配置。
+- 混合 KV `-ctk q8_0 -ctv turbo4_0` 的探测结果需要区分启动和实际长输入：当前使用 `-c 200000`，`/props` 实际报告 `n_ctx = 200192`，已通过健康检查和最小生成。`-c 210000` 实际报告 `n_ctx = 210176`，但约 189981 个输入 token 在 decode 阶段触发 `ROCm error: out of memory`，不能视为可用的长上下文上限。`-c 229376` 在当前二进制加载 DFlash2/MTP 时也因显存不足失败。该探测不是满上下文压力测试，当前 200K 配置仅确认可启动和处理短请求。
 - `--no-warmup` 会让部分运行时分配延迟到真实请求；启动成功不等于推理可用。降低 `-ub` 可以降低部分计算缓冲和临时显存压力，但不会缩小 KV，prefill 也可能变慢。
 - `--no-mmproj-offload` 用 CPU 运行视觉编码器，用于需要图片输入又想减少 GPU 占用的情况，图片处理通常更慢。
 - `HSA_ENABLE_SDMA=0` 是 ROCm 传输路径的兼容性选项，不应未经对比就作为必需的加速参数。
 - `--alias qwen` 只提供稳定的 API 模型别名，不影响推理性能。
+
+### q8 K + turbo4 V 混合配置的降速与修复
+
+日常配置继续使用 `-ctk turbo4_0 -ctv turbo4_0`。混合配置服务必须监听 `0.0.0.0`，不能使用 `127.0.0.1`，否则其他机器无法访问 1234 端口。后续启动混合 KV 服务统一使用 `--host 0.0.0.0`。修复前，`q8_0 K + turbo4_0 V` 虽能加载并完成极短请求，但贪吃蛇生成测试出现断崖式降速，不应将此前的启动探测当作稳定可用结论。
+
+本次使用 `build-turbo4/bin/llama-server`、相同主模型及 DFlash2、`-c 65536 -b 2048 -ub 512`，请求设置 `max_tokens: 65535`、`temperature: 0` 并关闭思考。混合 KV 在生成 125 token 时累计速度为 41.17 tok/s，530 token 时降至 21.43 tok/s，1026 token 时仅 16.40 tok/s，1891 token 时仅 11.49 tok/s；测试中止，未取得完整生成结果。此前相同贪吃蛇请求的双 turbo4 完整生成速度为 54.99 tok/s，但输出内容和长度不同，不是严格同 token 性能对照。
+
+对 `-c 210000` 的实际长输入复测：约 189981 个输入 token 在 decode 阶段触发 ROCm OOM，服务端断开请求；短请求不能证明接近 `n_ctx` 的长输入可用。
+
+修复前，`ggml/src/ggml-cuda/fattn.cu` 要求 K/V 同时为 turbo4 才能选择 turbo4 GPU Flash Attention 向量内核，混合配置返回 `BEST_FATTN_KERNEL_NONE`。现已仅为 `q8_0 K + turbo4_0 V` 补齐 128/256 维内核分发、模板实例及 HIP/CUDA 构建列表，复用现有 q8 K 点积和 turbo4 V 解码，不扩展其他混合组合。
+
+已重新编译 `build-turbo4`，GPU 数值测试覆盖 128/256 维、1/5 个 query，双 turbo4 与混合组合共 8 项全部通过，注意力最大绝对误差均小于 0.002。相同贪吃蛇请求下，修复后的混合 KV 完整生成 11981 token，服务端速度 55.51 tok/s，墙钟速度 55.43 tok/s，总耗时 216.16 秒；本次未再出现此前的断崖式降速。此前双 q8 为 56.04 tok/s，双 turbo4 为 54.99 tok/s；不同输出长度下的单次生成结果不能视为严格同 token 对照，也没有证明混合 KV 的质量收益或长上下文稳定性。
+
+结果：`results/snake-q8k-turbo4v-patched.json`。修复前日志：`/tmp/kv-snake-q8k-turbo4v.log`；修复后日志：`/tmp/kv-snake-q8k-turbo4v-patched.log`；编译日志：`/tmp/build-mixed-turbo4.log`。临时目录中的文件不保证重启后保留。
 
 ## 4. 正确设置思考强度
 
@@ -139,7 +155,7 @@ dflash requires ctx_other to be set (this warning is normal during memory fittin
 | `medium` | 不注入额外的强度指令，仍保持思考模式 |
 | `low` | 注入简短、聚焦思考的系统指令 |
 
-当前 UD 模型模板接受 `xhigh`、`medium`、`low`，并将 `high` 映射为 `xhigh`；此前 ROCmFP4 STRIX 模型模板不包含该别名。不要套用其他模型的 `minimal`、`max`。当前启动显式使用 `medium`；不指定时模板默认 `xhigh`，单次请求可以覆盖。
+当前 UD 模型模板接受 `xhigh`、`medium`、`low`，并将 `high` 映射为 `xhigh`；此前 ROCmFP4 STRIX 模型模板不包含该别名。不要套用其他模型的 `minimal`、`max`。当前启动显式使用 `--reasoning-effort medium`；后续双 turbo4 和混合 KV 启动都必须保留该参数；单次请求可以覆盖。
 
 推荐通过当前版本的专用参数设置：
 

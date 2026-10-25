@@ -1,0 +1,4 @@
+{"id": "t2-1-max", "kind": "t2", "expect": ["EMP-0311", "39852"], "target_tokens": 40000, "answer": "EMP-0311，39852", "error": null, "elapsed_sec": 85.58203883699935, "prompt_tokens": 52411, "completion_tokens": 13}
+{"id": "t2-2-count", "kind": "t2", "expect": ["88"], "target_tokens": 40000, "answer": "108", "error": null, "elapsed_sec": 1.5993069549986103, "prompt_tokens": 52406, "completion_tokens": 4}
+{"id": "t2-3-earliest", "kind": "t2", "expect": ["EMP-0341"], "target_tokens": 40000, "answer": "EMP-0101", "error": null, "elapsed_sec": 1.7168966569988697, "prompt_tokens": 52410, "completion_tokens": 7}
+{"id": "t2-4-lookup", "kind": "t2", "expect": ["西安"], "target_tokens": 40000, "answer": "西安", "error": null, "elapsed_sec": 1.4529237059996376, "prompt_tokens": 52405, "completion_tokens": 2}
